@@ -1,0 +1,243 @@
+import sys
+import os
+import PIL
+import Image
+import time
+import numpy
+import thread
+import threading
+from multiprocessing import Queue, Process, Manager
+from PyQt4 import QtGui
+from PyQt4 import QtCore
+
+gSupportedFormat = ['.jpg', '.bmp', '.png', '.jpeg']
+gImageList = []
+
+gSemaphore = threading.Semaphore(0)
+
+class MyImage:
+    def __init__(self,im,outputImg):
+        self.pix = numpy.array(im)
+        self.strOutputImgName = outputImg             
+
+class Ui_imgConvertor(QtGui.QWidget):
+    
+    def __init__(self):
+        super(Ui_imgConvertor, self).__init__()
+        
+        self.initUI()    
+    
+    notifyProgress = QtCore.pyqtSignal(int)
+    
+    def initUI(self):      
+
+        #Set input directory address, default value point to F:\\Pictures
+        strInputDirEdit = QtGui.QLineEdit(self)
+        strInputDirEdit.setText('F:\\Photo')
+        btnInputDir = QtGui.QPushButton("Input Director", self)
+        btnInputDir.clicked.connect(lambda: self.openFolder(strInputDirEdit))
+
+        btnInputDir.move(60,20)
+        btnInputDir.resize(85,23)
+        strInputDirEdit.move(150,21)
+        
+        #Set output directory address, default value point to F:\\Pictures
+        strOutputDirEdit = QtGui.QLineEdit(self)
+        strOutputDirEdit.setText('F:\\picture')
+        btnOutputDir = QtGui.QPushButton("Output Director", self)             
+        btnOutputDir.clicked.connect(lambda: self.openFolder(strOutputDirEdit))
+        
+        btnOutputDir.move(60,50)
+        btnOutputDir.resize(85,23)  
+        strOutputDirEdit.move(150,51)
+        
+        self.imgFormatCombo = QtGui.QLabel("Convert images into:", self)
+        combo = QtGui.QComboBox(self)
+        combo.addItem(".jpg")
+        combo.addItem(".bmp")
+        self.imgFormatCombo.move(350, 22)
+        combo.move(470, 20)        
+        combo.activated[str].connect(self.onActivated)
+        
+        self.progressBar = QtGui.QProgressBar(self)
+        self.progressBar.setRange(0,100)
+        self.progressBar.setGeometry(60, 120, 500, 25)
+        
+        btnConvertor = QtGui.QPushButton("Convert", self)
+        btnConvertor.move(410, 50)      
+        btnConvertor.clicked.connect(lambda: self.convert(strInputDirEdit, strOutputDirEdit, str(combo.currentText())))        
+        
+        #Update progressBar
+        self.notifyProgress.connect(self.onProgress)
+
+        self.setGeometry(300, 300, 600, 200) 
+        self.setWindowTitle('Image Convertor')
+        self.show()
+
+    def onProgress(self, i):
+        if i > 100:
+            self.progressBar.setValue(100)
+        self.progressBar.setValue(i)
+    
+    #open a dialog window for directory selection
+    def openFolder(self, dir):
+        openDir = QtGui.QFileDialog.getExistingDirectory(
+            self, "Open Directory",
+            str(dir.text()),
+            QtGui.QFileDialog.ShowDirsOnly | QtGui.QFileDialog.DontResolveSymlinks,
+        )
+        dir.setText(openDir)
+        
+    def onActivated(self, text):     
+        self.imgFormatCombo.setText(text)
+        self.imgFormatCombo.adjustSize()  
+            
+    def convert(self, strInputDirEdit, strOutputDirEdit, strformate):        
+        strInputDir = strInputDirEdit.text()
+        strOutputDir = strOutputDirEdit.text()
+        self.imgConvertor(str(strInputDir), str(strOutputDir), strformate)
+
+    #Image conversion function
+    def imgConvertor(self, gStrInputDir, gStrOutputDir, strformate):
+
+        if not os.path.exists(os.path.dirname(gStrInputDir)):
+            err = msgBox1() #display error msg dialog
+        assert os.path.exists(os.path.dirname(gStrInputDir)),'The input directory is invalid.'
+
+        try:
+            if not os.path.exists(gStrOutputDir):
+                print 'Creat a new directory:', gStrOutputDir
+                os.makedirs(gStrOutputDir)
+        except:
+            err = msgBox2() #display error msg dialog
+            print 'The output directory:', gStrOutputDir, ' is invalid.'
+            raise
+        
+        #calculate image numbers need to be converted
+        imgNumber = 0
+        step = 0
+        for root, dirs, files in os.walk(gStrInputDir):
+            for name in files:
+                imgNumber += 1
+        
+        print 'imgNumber', imgNumber
+        currentTime = time.time()
+        
+        #set up multi-threads for image opening and saving
+        thread.start_new_thread(self.openImage, (gStrInputDir, strformate, gStrOutputDir))  
+        thread.start_new_thread(self.saveImage, (currentTime, imgNumber, step)) 
+        
+        imgNumber = 0
+#        print 'Number of arguments:', len(sys.argv), 'arguments.'
+#        print 'Argument List:', str(sys.argv)
+#        print 'Input directory:', gStrInputDir
+#        print 'Output directory:', gStrOutputDir
+
+    def openImage(self, gStrInputDir, strformate, gStrOutputDir):
+        
+        for root, dirs, files in os.walk(gStrInputDir):
+            for name in files:
+                imagePath = root+'\\'+name
+                f, e = os.path.splitext(imagePath) #split file name into name and extension name
+                if e.lower() in gSupportedFormat: 
+                    im = Image.open(imagePath)
+                    strOutputImgName = f + strformate
+                    strOutputImgName = gStrOutputDir+'\\'+strOutputImgName[len(gStrInputDir):] #generate new file root+name
+                    
+                    myImage = MyImage(im,strOutputImgName)
+                    #print 'strOutputImgName:', strOutputImgName
+                    #print 'imagepath is:'+imagePath
+                    gImageList.append(myImage)
+                    gSemaphore.release()
+                else: 
+                    print 'Image Format is invalid', imagePath
+        gImageList.append(None) #push none to gImageList as an end signal 
+        gSemaphore.release()
+        
+        thread.exit_thread() 
+        
+    def saveImage(self, startTime, imgNumber, step):
+        
+        gSemaphore.acquire()
+        myImage = gImageList.pop(0)
+        while myImage != None :
+            try:
+                imgDir = os.path.dirname(myImage.strOutputImgName)
+
+                if not os.path.exists(imgDir):
+                    print 'Creat a new directory:', imgDir
+                    os.makedirs(imgDir)
+
+                imOut = Image.fromarray(myImage.pix)
+                imOut.save(myImage.strOutputImgName)
+                #print 'imgDir:', myImage.strOutputImgName
+                
+                #emit signal for updating processingBar
+                step += 1
+                if step < imgNumber:
+                    i = (100.0/imgNumber)*step
+                    self.notifyProgress.emit(i)
+                elif step == imgNumber:
+                    self.notifyProgress.emit(100)
+                
+            except IOError:
+                print 'ERROR Image cannot convert:', strOutputImgName
+            gSemaphore.acquire()
+            myImage = gImageList.pop(0)
+                
+        endTime = time.time()
+        print 'processing time:', endTime-startTime
+        thread.exit_thread()     
+
+#error msgBox1     
+class msgBox1(QtGui.QWidget):    
+
+    def __init__(self):   
+        super(msgBox, self).__init__()             
+        self.initUI()      
+        
+    def initUI(self):
+        lbl1 = QtGui.QLabel('The input directory is invalid.', self)
+        lbl1.move(15, 10)
+        qbtn = QtGui.QPushButton('OK', self)
+        qbtn.clicked.connect(self.closeEvent)
+        qbtn.resize(qbtn.sizeHint())
+        qbtn.move(50, 50)              
+        self.setGeometry(300, 300, 170, 100)
+        self.setWindowTitle('Error Message')    
+        self.show()       
+        
+    def closeEvent(self):
+        self.deleteLater()
+        
+#error msgBox2
+class msgBox2(QtGui.QWidget):   
+ 
+    def __init__(self):
+        super(msgBox, self).__init__()        
+        self.initUI()       
+        
+    def initUI(self):
+        lbl1 = QtGui.QLabel('The output directory is invalid.', self)
+        lbl1.move(15, 10)
+        qbtn = QtGui.QPushButton('OK', self)
+        qbtn.clicked.connect(self.closeEvent)
+        qbtn.resize(qbtn.sizeHint())
+        qbtn.move(50, 50)              
+        self.setGeometry(300, 300, 170, 100)
+        self.setWindowTitle('Error Message')    
+        self.show()       
+        
+    def closeEvent(self):
+    
+        self.deleteLater()
+           
+def main():
+    
+    app = QtGui.QApplication(sys.argv)
+    ex = Ui_imgConvertor()
+    sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
